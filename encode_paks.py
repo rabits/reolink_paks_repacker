@@ -36,8 +36,38 @@ def tree_is_newer(dirpath, stamp_ns):
                 return True
     return False
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from repack_ubi import splice
+PEB, VID_OFF, DATA_OFF = 131072, 2048, 4096
+LEB = PEB - DATA_OFF
+_VID = '>4sBBBBII4sIIII4sQ12sI'
+VID_FIELDS = ['magic','version','vol_type','copy_flag','compat','vol_id','lnum',
+              'pad','data_pad','data_size','used_ebs','pad2','pad3','sqnum','pad4','crc']
+
+def mapped_lebs(img):
+    """{lnum: peb} for volume 0 of a UBI image."""
+    m = {}
+    for p in range(len(img) // PEB):
+        v = img[p*PEB + VID_OFF : p*PEB + VID_OFF + 64]
+        if v[:4] != b'UBI!':
+            continue
+        f = dict(zip(VID_FIELDS, struct.unpack(_VID, bytes(v))))
+        if f['vol_id'] == 0:
+            m[f['lnum']] = p
+    return m
+
+def splice(template, filesystem):
+    """Return new image bytes: template UBI with volume 0's payload replaced
+    by `filesystem` (0xFF-padded to the original volume capacity)."""
+    d = bytearray(template)
+    sq = bytes(filesystem)
+    lebs = [p for _, p in sorted(mapped_lebs(d).items())]
+    cap = len(lebs) * LEB
+    if len(sq) > cap:
+        raise ValueError(f'new filesystem {len(sq)} > volume capacity {cap} '
+                         f'({len(lebs)} LEBs) — shrink it (remove unused resources)')
+    blob = sq + b'\xff' * (cap - len(sq))
+    for i, p in enumerate(lebs):
+        d[p*PEB + DATA_OFF : (p+1)*PEB] = blob[i*LEB:(i+1)*LEB]
+    return bytes(d)
 
 def crc0(b):
     return zlib.crc32(b, 0xffffffff) ^ 0xffffffff
